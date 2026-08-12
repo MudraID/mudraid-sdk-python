@@ -1,0 +1,159 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mudraid-sdk"
+version = "1.1.0"
+description = "Python SDK for MudraID — drop-in replacement for `requests` that adds transparent agent authentication and per-platform token routing."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "MudraID" },
+]
+keywords = [
+    "mudraid",
+    "agent",
+    "authentication",
+    "jwt",
+    "trust-layer",
+    "ai-agents",
+]
+classifiers = [
+    # "Development Status :: 5 - Production/Stable" is a claim rather than a
+    # formality, so it is made deliberately and it is made about ONE thing: this
+    # SDK's own surface. 1.1.0 is the API MudraID intends to keep, which is what
+    # this classifier says and all it says.
+    #
+    # It does NOT say the package is on PyPI yet — that is a different fact,
+    # carried by `support_status` in `sdks/support-matrix.json`, which stays
+    # `prerelease` until the first upload actually lands.
+    # scripts/check_adapter_support_matrix.py guards that one.
+    #
+    # It does NOT say the enforcement loop is production-proven. Enforcement and
+    # end-to-end verification remain declared capability gaps, reported honestly
+    # elsewhere rather than quietly upgraded here.
+    #
+    # This classifier must equal the `maturity` its matrix entry declares —
+    # `stable`. scripts/check_release_maturity.py holds the two equal, because
+    # they contradicted each other once and it was invisible until someone read
+    # both files side by side.
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+
+# Runtime dependencies are intentionally minimal so the SDK does not
+# drag heavy transitive packages into agent codebases.
+dependencies = [
+    "requests>=2.31,<3",
+    # python-dotenv is used to read MUDRAID_API_KEY_ID / MUDRAID_SECRET from
+    # a project's .env file. It is the de-facto standard for this pattern
+    # in the Python ecosystem; integrators who already populate the OS
+    # environment never pay the load cost.
+    "python-dotenv>=1.0,<2",
+]
+
+# The V2 machine-authority profile signs `private_key_jwt` client assertions.
+# Signing is pluggable (see mudraid.AssertionSigner) so the SDK core stays
+# crypto-free; the built-in `PyJWTSigner` needs PyJWT, provided here as an
+# opt-in extra for integrators who want batteries-included signing.
+[project.optional-dependencies]
+v2 = [
+    # SECURITY FLOORS — see the same note in
+    # sdks/mudraid-middleware-python/pyproject.toml for the advisory data these
+    # come from. The previous `cryptography>=42,<46` capped
+    # below every version that fixes the records affecting 42–45, so a clean
+    # scan was unreachable inside the declared range.
+    "PyJWT>=2.13.0,<3",
+    "cryptography>=50.0.0",
+]
+dev = [
+    # pytest-asyncio auto-loads whenever it is present, and a mismatched
+    # (pytest, pytest-asyncio) pair crashes collection ('Package' object has no
+    # attribute 'obj' / FixtureDef import errors) — so the two move together or
+    # not at all. This package authors no async tests; the constraint exists
+    # purely for deterministic, crash-free collection.
+    #
+    # The floor is a security floor, not a preference. pytest before 9.0.3
+    # carries PYSEC-2026-1845 (predictable temporary-directory handling on
+    # Unix), and the previous exact pins — 7.4.4 here, `>=8.0,<9` in the
+    # middleware — could not reach the fix from inside their own ranges. That
+    # is the same shape as the cryptography bound above: a cap below every
+    # version that fixes what the range admits. Nothing here reaches customer
+    # runtime, whose audit is clean; this is the build and test supply chain,
+    # which is worth holding to the same rule.
+    "pytest>=9.0.3,<10",
+    "pytest-asyncio>=1.0,<2",
+    "pytest-cov>=7,<8",
+    # `responses` mocks the requests library — used to test SDK behaviour
+    # against canned HTTP responses without spinning up the backend.
+    "responses>=0.25,<1",
+]
+
+[project.urls]
+Homepage = "https://github.com/MudraID/mudraid-sdk-python"
+Documentation = "https://docs.mudraid.ai"
+Repository = "https://github.com/MudraID/mudraid-sdk-python"
+Issues = "https://github.com/MudraID/mudraid-sdk-python/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mudraid"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/mudraid",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+
+# Align black + isort with the rest of the repo (line-length 100 from the
+# root pyproject.toml). The SDK pyproject is discovered first when black
+# is invoked with cwd=sdks/mudraid-sdk-python, so the root setting would
+# not otherwise apply.
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+# Ruff is configured HERE and not only at the workspace root, because this
+# directory is mirrored to a public repository where no workspace root exists.
+# A package that inherits its lint rules from a parent it does not ship with is
+# a package whose published CI lints with defaults — different rules, silently.
+#
+# target-version is py310, not the workspace's py311: `requires-python` admits
+# 3.10, so the rules must target the OLDEST interpreter this package claims.
+# Linting against a newer one permits syntax that fails for a customer on the
+# version we told pip was fine.
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.ruff.lint.isort]
+# Without this, ruff has no way to know `mudraid` is ours and groups it with
+# third-party imports — which is not a style question here: it is the package
+# under test being filed as somebody else's.
+known-first-party = ["mudraid"]
