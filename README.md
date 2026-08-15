@@ -75,16 +75,10 @@ request, by construction.
 ## Installation
 
 ```bash
-pip install mudraid-sdk
+pip install mudraid-sdk==1.1.0
 ```
 
 Requires Python 3.10+.
-
-> **1.1.0 is not on PyPI yet.** Install from source until the first
-> upload lands:
-> ```bash
-> pip install -e sdks/mudraid-sdk-python  # from the repo root
-> ```
 
 ---
 
