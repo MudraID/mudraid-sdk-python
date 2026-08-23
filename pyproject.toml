@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mudraid-sdk"
-version = "1.1.0"
+version = "1.2.0"
 description = "Python SDK for MudraID — drop-in replacement for `requests` that adds transparent agent authentication and per-platform token routing."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,7 +23,7 @@ keywords = [
 classifiers = [
     # "Development Status :: 5 - Production/Stable" is a claim rather than a
     # formality, so it is made deliberately and it is made about ONE thing: this
-    # SDK's own surface. 1.1.0 is the API MudraID intends to keep, which is what
+    # SDK's own surface. 1.2.0 is the API MudraID intends to keep, which is what
     # this classifier says and all it says.
     #
     # It does NOT say the package is on PyPI yet — that is a different fact,

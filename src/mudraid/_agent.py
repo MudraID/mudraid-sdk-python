@@ -88,9 +88,18 @@ class Agent:
          ``MUDRAID_BASE_URL``)
       3. A ``.env`` file in the project tree (auto-discovered)
 
+    Multi-agent applications can give each agent its own variables with
+    ``prefix``: the prefix replaces the ``MUDRAID`` segment of the names, so
+    ``Agent(prefix="SUPERVISOR")`` reads ``SUPERVISOR_API_KEY_ID`` and
+    ``SUPERVISOR_SECRET`` (and ``SUPERVISOR_BASE_URL`` if set, falling back
+    to the shared ``MUDRAID_BASE_URL``). Prefixed credentials never fall
+    back to the unprefixed pair — a missing prefixed variable is an error
+    naming exactly the variables that were consulted.
+
     Raises:
         MudraIDConfigError: when ``api_key_id`` or ``secret`` cannot
-            be resolved from any of the above. ``base_url`` always has a
+            be resolved from any of the above, or when ``prefix`` is not a
+            usable env-var name fragment. ``base_url`` always has a
             sensible production default and never raises on its own.
 
     The first outgoing request triggers a one-time bootstrap call to
@@ -103,11 +112,13 @@ class Agent:
         api_key_id: str | None = None,
         secret: str | None = None,
         base_url: str | None = None,
+        prefix: str | None = None,
     ) -> None:
         self._config: SdkConfig = load_config(
             api_key_id=api_key_id,
             secret=secret,
             base_url=base_url,
+            prefix=prefix,
         )
         # api_key_id is public; base_url is public. Logging both is
         # safe and useful for "which agent did this?" debugging.
@@ -134,6 +145,7 @@ class Agent:
         api_key_id: str | None = None,
         secret: str | None = None,
         base_url: str | None = None,
+        prefix: str | None = None,
     ) -> "Agent":
         """Explicitly construct the legacy api_key_id/secret auth profile.
 
@@ -146,7 +158,7 @@ class Agent:
         class docstring for the retirement policy.
         """
         _logger.info("Agent.legacy() — constructing the legacy auth profile explicitly")
-        return cls(api_key_id=api_key_id, secret=secret, base_url=base_url)
+        return cls(api_key_id=api_key_id, secret=secret, base_url=base_url, prefix=prefix)
 
     # ---- public, safe-to-read accessors ---------------------------------
 

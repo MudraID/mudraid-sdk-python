@@ -6,6 +6,20 @@ Reads:
   - ``MUDRAID_SECRET``      (required)
   - ``MUDRAID_BASE_URL``    (optional; falls back to the production default)
 
+With ``prefix="SUPERVISOR"`` (KAN-90, multi-agent applications) the prefix
+REPLACES the ``MUDRAID`` segment of the credential names — the suffixes are
+unchanged:
+
+  - ``SUPERVISOR_API_KEY_ID``  (required)
+  - ``SUPERVISOR_SECRET``      (required)
+  - ``SUPERVISOR_BASE_URL``    (optional; falls back to ``MUDRAID_BASE_URL``,
+    then the production default — the base URL is deployment topology, not
+    identity, so unlike credentials it is legitimately shared)
+
+Prefixed credentials deliberately do NOT fall back to the unprefixed pair: a
+prefixed agent silently borrowing ``MUDRAID_*`` would hand it another agent's
+identity, which is the exact bug class the prefix exists to prevent.
+
 Convention: integrators store these in a ``.env`` file in their project
 root. python-dotenv loads that file into ``os.environ`` on first access;
 explicit arguments to :class:`mudraid.Agent` always win.
@@ -21,6 +35,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -54,6 +69,13 @@ DEFAULT_BASE_URL = "https://api.mudraid.ai"
 _ENV_API_KEY_ID = "MUDRAID_API_KEY_ID"
 _ENV_SECRET = "MUDRAID_SECRET"  # nosec B105 - env-var NAME, not the secret value
 _ENV_BASE_URL = "MUDRAID_BASE_URL"
+
+# What a normalized prefix must look like: a POSIX-portable env-var name
+# fragment — uppercase letter first, then uppercase letters, digits, or single
+# underscores. Leading underscores are refused (reserved-looking), embedded
+# doubles are refused rather than collapsed (guessing which variable the
+# integrator meant is worse than asking them to spell it).
+_PREFIX_RE = re.compile(r"^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$")
 
 # Lazy one-time dotenv load. Filesystem walks are cheap but not free; we
 # pay the cost the first time any Agent() is constructed and never again.
@@ -162,10 +184,42 @@ class SdkConfig:
     base_url: str
 
 
+def _normalize_prefix(prefix: str) -> str:
+    """Return the canonical form of a credential prefix, or raise.
+
+    Normalized (obvious spellings of the same intent):
+      * surrounding whitespace is stripped
+      * lowercase is uppercased (``"supervisor"`` → ``"SUPERVISOR"``)
+      * trailing underscores are dropped (``"SUPERVISOR_"`` → ``"SUPERVISOR"``,
+        so the variable looked up is ``SUPERVISOR_API_KEY_ID`` and never the
+        surprise ``SUPERVISOR__API_KEY_ID``)
+
+    Refused (guessing would resolve credentials from a variable the
+    integrator never wrote): empty/whitespace-only, leading digit or
+    underscore, embedded whitespace, ``-`` or any other character that is not
+    legal in a portable env-var name, and embedded double underscores.
+
+    Raises:
+        MudraIDConfigError: with the offending value and the accepted shape.
+    """
+    normalized = prefix.strip().upper().rstrip("_")
+    if not _PREFIX_RE.fullmatch(normalized):
+        raise MudraIDConfigError(
+            f"Invalid credential prefix {prefix!r}. A prefix must be usable as an "
+            "environment-variable name fragment: start with a letter and contain "
+            "only letters, digits, and single underscores (e.g. 'SUPERVISOR', "
+            "'WEBSITE_API'). It replaces the MUDRAID segment of the variable "
+            "names: Agent(prefix='SUPERVISOR') reads SUPERVISOR_API_KEY_ID and "
+            "SUPERVISOR_SECRET."
+        )
+    return normalized
+
+
 def load_config(
     api_key_id: str | None = None,
     secret: str | None = None,
     base_url: str | None = None,
+    prefix: str | None = None,
 ) -> SdkConfig:
     """Resolve SDK configuration with kwarg > env precedence.
 
@@ -174,26 +228,51 @@ def load_config(
       2. ``os.environ`` (already populated by the OS / container)
       3. Values from a ``.env`` file in the project tree
 
+    ``prefix`` renames the variables consulted at steps 2–3: the prefix
+    replaces the ``MUDRAID`` segment, so ``prefix="SUPERVISOR"`` reads
+    ``SUPERVISOR_API_KEY_ID`` / ``SUPERVISOR_SECRET`` / ``SUPERVISOR_BASE_URL``.
+    Credentials never fall back from the prefixed names to the unprefixed
+    ones (a prefixed agent must not silently borrow another identity); the
+    base URL does fall back to ``MUDRAID_BASE_URL`` and then the default,
+    because it describes the deployment, not the agent.
+
     Raises:
         MudraIDConfigError: when ``api_key_id`` or ``secret`` cannot be
             resolved after consulting both kwargs and the environment.
-            The error message lists the missing variables so the
-            developer doesn't have to guess.
+            The error message lists the missing variables — the *prefixed*
+            names when a prefix is in play — so the developer doesn't have
+            to guess. Also raised for a malformed ``prefix``.
     """
     _ensure_dotenv_loaded()
+
+    if prefix is not None:
+        canonical = _normalize_prefix(prefix)
+        env_api_key_id = f"{canonical}_API_KEY_ID"
+        env_secret = f"{canonical}_SECRET"
+        env_base_url = f"{canonical}_BASE_URL"
+    else:
+        env_api_key_id = _ENV_API_KEY_ID
+        env_secret = _ENV_SECRET
+        env_base_url = _ENV_BASE_URL
 
     # ``Optional[str] or str`` evaluates to str at runtime but mypy
     # widens it back to Optional[str]; the ``or ""`` tail pins the
     # type so ``.strip()`` is callable. The behaviour is unchanged.
-    resolved_id: str = (api_key_id or os.environ.get(_ENV_API_KEY_ID) or "").strip()
-    resolved_secret: str = (secret or os.environ.get(_ENV_SECRET) or "").strip()
-    resolved_url = base_url or os.environ.get(_ENV_BASE_URL, "").strip() or DEFAULT_BASE_URL
+    resolved_id: str = (api_key_id or os.environ.get(env_api_key_id) or "").strip()
+    resolved_secret: str = (secret or os.environ.get(env_secret) or "").strip()
+    resolved_url = (
+        base_url
+        or os.environ.get(env_base_url, "").strip()
+        # The global base URL backstops every prefix — see the docstring.
+        or os.environ.get(_ENV_BASE_URL, "").strip()
+        or DEFAULT_BASE_URL
+    )
 
     missing: list[str] = []
     if not resolved_id:
-        missing.append(_ENV_API_KEY_ID)
+        missing.append(env_api_key_id)
     if not resolved_secret:
-        missing.append(_ENV_SECRET)
+        missing.append(env_secret)
     if missing:
         raise MudraIDConfigError(
             "Missing MudraID credentials: "

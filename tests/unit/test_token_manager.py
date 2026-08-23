@@ -317,9 +317,12 @@ def test_non_json_response_raises_network_error(rsps: responses.RequestsMock) ->
 
 
 def test_missing_expires_in_uses_safe_fallback(rsps: responses.RequestsMock) -> None:
-    """Backend should always send expires_in (locked at 900s) but if it
-    drops the field we cache the token for 15 min rather than 0
-    (which would mean we re-mint on the next call)."""
+    """Backend should always send expires_in. It is NOT a locked 900 s — the
+    native token's lifetime defaults to 300 s and is env-tunable up to a 900 s
+    ceiling, which is exactly why the SDK caches on the value it was sent. If
+    the field is dropped we fall back to ``_FALLBACK_EXPIRES_IN_SEC`` (300 s,
+    deliberately short) and cache for that long rather than 0 (which would mean
+    we re-mint on the next call)."""
     rsps.add(responses.POST, TOKEN_URL, json={"access_token": "jwt"}, status=200)
 
     mgr = _build_manager()

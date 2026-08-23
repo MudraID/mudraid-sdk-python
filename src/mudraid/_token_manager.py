@@ -23,8 +23,11 @@ Locked design notes:
   release.
 - The refresh-skew (default 30 s) is a deliberate over-correction:
   it triggers a refresh *before* expiry so a long-running request will
-  not race the 15-minute boundary. Clock skew between the SDK host and
-  MudraID's signer also lives inside this margin.
+  not race the expiry boundary. That boundary is whatever the server
+  stated in ``expires_in`` — the native token's lifetime defaults to
+  300 s and is tunable per environment up to a 900 s ceiling — and NOT
+  the fixed fifteen minutes this note used to name. Clock skew between
+  the SDK host and MudraID's signer also lives inside this margin.
 """
 
 from __future__ import annotations

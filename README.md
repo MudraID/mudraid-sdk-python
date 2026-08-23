@@ -70,13 +70,38 @@ one for outgoing platform calls. They never share connections — your
 agent secret can never accidentally leak onto a platform-bound
 request, by construction.
 
+### What bootstrap writes
+
+What the audit trail should show after an agent starts up:
+
+- A successful `POST /auth/agents/me/platforms` (the bootstrap read)
+  writes **nothing** — no audit event, no server-side state. Only a
+  *failed* authentication attempt against it is audited
+  (`agent_platforms_auth_failed`).
+- `POST /auth/token` emits **one** `agent_token_issued` audit event,
+  written in the background after the response is sent. No token is
+  stored server-side — the JWT is stateless and platforms verify it
+  against the JWKS.
+- **Neither** call produces a verification event. Verification entries
+  begin when the token is first *presented* to a verify/decide path, or
+  when the sandbox "Test authentication" action is used.
+
+So an agent that has bootstrapped and minted a token but not yet called
+a platform shows exactly one `agent_token_issued` event and no
+verification entries. That is correct, not missing data.
+
 ---
 
 ## Installation
 
 ```bash
-pip install mudraid-sdk==1.1.0
+pip install mudraid-sdk
 ```
+
+> **Which version this installs.** The latest on PyPI is **1.1.0**. This
+> source tree is **1.2.0**, which is not published yet — pinning `==1.2.0`
+> would fail to resolve. Install unpinned to get the current release, or pin
+> `==1.1.0` explicitly if you need a fixed version today.
 
 Requires Python 3.10+.
 
@@ -115,6 +140,78 @@ flights = response.json()
 ```
 
 That's it. The SDK is now handling authentication for every call.
+
+---
+
+## Multi-agent applications
+
+A process that runs several agents can't give them all the same
+`MUDRAID_API_KEY_ID` — later assignments would overwrite earlier ones.
+`prefix=` gives each agent its own pair of variables. The prefix **replaces
+the `MUDRAID` segment** of the default names; the suffixes stay exactly the
+same:
+
+| Constructor call | Key id variable | Secret variable |
+|---|---|---|
+| `Agent()` | `MUDRAID_API_KEY_ID` | `MUDRAID_SECRET` |
+| `Agent(prefix="SUPERVISOR")` | `SUPERVISOR_API_KEY_ID` | `SUPERVISOR_SECRET` |
+| `Agent(prefix="WEBSITE_API")` | `WEBSITE_API_API_KEY_ID` | `WEBSITE_API_SECRET` |
+
+`.env` for a four-agent system:
+
+```env
+SUPERVISOR_API_KEY_ID=muid_kid_...
+SUPERVISOR_SECRET=muid_sk_...
+RESEARCH_API_KEY_ID=muid_kid_...
+RESEARCH_SECRET=muid_sk_...
+CODER_API_KEY_ID=muid_kid_...
+CODER_SECRET=muid_sk_...
+WEBSITE_API_API_KEY_ID=muid_kid_...
+WEBSITE_API_SECRET=muid_sk_...
+
+# Shared by every agent unless a per-agent {PREFIX}_BASE_URL overrides it.
+MUDRAID_BASE_URL=https://api.staging.mudraid.ai
+```
+
+```python
+from mudraid import Agent
+
+supervisor_agent = Agent(prefix="SUPERVISOR")
+research_agent = Agent(prefix="RESEARCH")
+coder_agent = Agent(prefix="CODER")
+website_api_agent = Agent(prefix="WEBSITE_API")
+```
+
+Rules worth knowing:
+
+- **Credentials never fall back to the unprefixed names.** If
+  `SUPERVISOR_SECRET` is missing, construction raises `MudraIDConfigError`
+  naming `SUPERVISOR_SECRET` — it will not silently borrow `MUDRAID_SECRET`,
+  because handing one agent another agent's identity is the exact bug the
+  prefix exists to prevent.
+- **The base URL does fall back.** It describes your deployment, not an
+  identity: `{PREFIX}_BASE_URL` > `MUDRAID_BASE_URL` > the production
+  default.
+- **Explicit kwargs still win** over prefixed variables, same as always.
+- The prefix must be usable as an env-var name fragment (letters, digits,
+  single underscores; starts with a letter). `"supervisor"` and
+  `"SUPERVISOR_"` are normalized to `"SUPERVISOR"`; anything else is refused
+  with a `MudraIDConfigError` rather than guessed at.
+
+The SDK does **not** load your `.env` at import time, and won't — a library
+that mutates `os.environ` as an import side effect would let a stray `.env`
+inside a container image fight the real environment your orchestrator
+injects, and would make behaviour depend on import order. Construction of
+the first `Agent` triggers the (idempotent, `override=False`) load, which is
+early enough for every flow above. If you need the environment populated
+before any `Agent` exists — e.g. for your own `os.getenv` calls — do it
+explicitly at your program's entry point:
+
+```python
+from dotenv import load_dotenv
+
+load_dotenv()  # python-dotenv is already an SDK dependency
+```
 
 ---
 
@@ -265,8 +362,14 @@ An unkeyed POST or PATCH is surfaced to you unreplayed.
 | Public API key id | `MUDRAID_API_KEY_ID` | `api_key_id=` | (required) |
 | Secret | `MUDRAID_SECRET` | `secret=` | (required) |
 | MudraID base URL | `MUDRAID_BASE_URL` | `base_url=` | `https://api.mudraid.ai` |
+| Credential prefix | — | `prefix=` | (none — the `MUDRAID_*` names above) |
 
 Precedence: **kwarg > OS env > `.env` file**.
+
+With `prefix="SUPERVISOR"` the env vars consulted become
+`SUPERVISOR_API_KEY_ID`, `SUPERVISOR_SECRET`, and `SUPERVISOR_BASE_URL`
+(base URL falling back to `MUDRAID_BASE_URL`; credentials never falling
+back) — see **Multi-agent applications** above.
 
 Anything else (timeouts, cache TTLs) is internal and stable in v1.
 
