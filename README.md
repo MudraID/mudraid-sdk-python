@@ -98,6 +98,12 @@ are separate from merging changes into the backend repository.
 The private key remains local; the SDK signs an assertion, obtains a
 resource-bound token, then calls the platform.
 
+The token endpoint must use HTTPS. Cleartext HTTP is accepted only for explicit
+loopback hosts (`localhost`, `127.0.0.1`, `[::1]`) in local development. URLs
+with embedded credentials, fragments, whitespace or invalid ports are refused
+before any assertion is signed or sent. An HTTPS URL remains required when
+staging services run on a private network.
+
 The client must have an effective grant for the requested resource/scopes,
 valid agent binding and usable credentials in the correct organization and
 environment. Registration or linking alone grants no authority. Test V2 in

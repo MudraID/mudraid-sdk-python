@@ -28,12 +28,14 @@ metadata appear in diagnostics.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
+from urllib.parse import urlsplit
 
 import requests
 
@@ -41,6 +43,7 @@ from mudraid._http import billing_frozen_error, rate_limited_error
 from mudraid._scopes import RequestedScopes
 from mudraid.exceptions import (
     MudraIDAuthError,
+    MudraIDConfigError,
     MudraIDNetworkError,
     MudraIDRevokedError,
 )
@@ -61,6 +64,40 @@ _DEFAULT_TIMEOUT_SEC = 10.0
 # Only used if the endpoint omits ``expires_in`` — deliberately short so a
 # missing field never yields a long-lived cached token.
 _FALLBACK_EXPIRES_IN_SEC = 300
+
+
+def _validate_token_endpoint(endpoint: str) -> None:
+    """Validate before signing; never echo a potentially credential-bearing URL."""
+    message = (
+        "MachineIdentity.token_endpoint must be an absolute HTTPS URL without "
+        "userinfo, fragments or whitespace. HTTP is allowed only for an explicit "
+        "loopback host used in local development."
+    )
+    if any(ord(char) <= 32 or ord(char) == 127 for char in endpoint):
+        raise MudraIDConfigError(message)
+    try:
+        parts = urlsplit(endpoint)
+        host = parts.hostname
+        # Accessing port also validates its syntax and range.
+        port = parts.port
+        if (
+            parts.scheme not in {"https", "http"}
+            or not host
+            or parts.username is not None
+            or parts.password is not None
+            or "#" in endpoint
+            or port == 0
+        ):
+            raise ValueError
+    except ValueError:
+        raise MudraIDConfigError(message) from None
+    if parts.scheme == "http":
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = host == "localhost"
+        if not loopback:
+            raise MudraIDConfigError(message)
 
 
 class AssertionSigner(Protocol):
@@ -114,6 +151,7 @@ class MachineIdentity:
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"MachineIdentity.{name} is required and must be non-empty")
+        _validate_token_endpoint(self.token_endpoint)
         if self.assertion_ttl_seconds <= 0:
             raise ValueError("assertion_ttl_seconds must be positive")
 
@@ -309,9 +347,7 @@ class MachineTokenManager:
         if not 200 <= status < 300:
             error, description = _safe_oauth_error(response)
             if status == 400 and error:
-                raise MudraIDRevokedError(
-                    description or f"token request refused ({error})"
-                )
+                raise MudraIDRevokedError(description or f"token request refused ({error})")
             raise MudraIDNetworkError(f"unexpected status {status} from the token endpoint")
 
         try:
