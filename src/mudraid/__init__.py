@@ -32,6 +32,7 @@ from mudraid.exceptions import (
     MudraIDExecutionUnknownError,
     MudraIDNetworkError,
     MudraIDPlatformNotRegisteredError,
+    MudraIDProductionMachineClientRequiredError,
     MudraIDRateLimitedError,
     MudraIDRevokedError,
     MudraIDScopeError,
@@ -60,7 +61,8 @@ __all__ = [
     "MudraIDRateLimitedError",
     "MudraIDScopeError",
     "MudraIDBillingFrozenError",
+    "MudraIDProductionMachineClientRequiredError",
     "MudraIDExecutionUnknownError",
 ]
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"

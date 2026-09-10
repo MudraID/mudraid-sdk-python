@@ -200,3 +200,62 @@ def test_agent_does_not_expose_secret_via_attribute() -> None:
                 f"Secret leaked via public attribute `{attr}` — "
                 f"only the internal `_config` is allowed to hold it."
             )
+
+
+# ---- an unconfigured base URL is reported as configuration ---------------
+
+
+def test_load_config_records_whether_the_base_url_was_defaulted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-launch scan SSC-17 — the fact that drives the transport message."""
+    assert load_config(api_key_id="x", secret="y").base_url_defaulted is True
+    assert (
+        load_config(api_key_id="x", secret="y", base_url=DEFAULT_BASE_URL).base_url_defaulted
+        is False
+    )
+    monkeypatch.setenv("MUDRAID_BASE_URL", "https://api.staging.mudraid.test")
+    assert load_config(api_key_id="x", secret="y").base_url_defaulted is False
+
+
+def test_a_transport_failure_against_the_default_host_names_the_setting() -> None:
+    """Pre-launch scan SSC-17 — an integrator who omitted MUDRAID_BASE_URL is
+    told the base URL must be set, and where to get it, instead of a DNS
+    failure the docs describe as possibly transient."""
+    import requests
+    import responses
+
+    from mudraid import MudraIDNetworkError
+
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        rsps.add(
+            responses.POST,
+            f"{DEFAULT_BASE_URL}/api/v1/auth/agents/me/platforms",
+            body=requests.exceptions.ConnectionError("name resolution failed"),
+        )
+        agent = Agent(api_key_id="muid_kid_x", secret="muid_sk_y")
+        with pytest.raises(MudraIDNetworkError) as exc:
+            agent.get("https://api.example.test/things")
+    message = str(exc.value)
+    assert "MUDRAID_BASE_URL is not set" in message
+    assert "credential screen" in message
+    assert DEFAULT_BASE_URL in message
+
+
+def test_a_transport_failure_against_an_explicit_base_url_does_not_blame_the_setting() -> None:
+    """The same host chosen deliberately is not second-guessed."""
+    import requests
+    import responses
+
+    from mudraid import MudraIDNetworkError
+
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        rsps.add(
+            responses.POST,
+            f"{DEFAULT_BASE_URL}/api/v1/auth/agents/me/platforms",
+            body=requests.exceptions.ConnectionError("name resolution failed"),
+        )
+        agent = Agent(api_key_id="muid_kid_x", secret="muid_sk_y", base_url=DEFAULT_BASE_URL)
+        with pytest.raises(MudraIDNetworkError) as exc:
+            agent.get("https://api.example.test/things")
+    assert "MUDRAID_BASE_URL is not set" not in str(exc.value)

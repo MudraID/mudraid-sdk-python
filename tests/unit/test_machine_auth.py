@@ -340,3 +340,70 @@ def test_401_exception_message_does_not_echo_assertion(
         MachineTokenManager(_identity()).get_token()
     # 401 uses a constant message, never the server body / assertion.
     assert _ASSERTION_SENTINEL not in str(exc.value)
+
+
+# ---- the plan's refusals are typed, as in the legacy profile ------------
+
+
+def test_429_with_retry_after_maps_to_the_typed_rate_limit_error(
+    rsps: responses.RequestsMock,
+) -> None:
+    """Pre-launch scan SSC-11 — a rate-limited token request raises the same
+    MudraIDRateLimitedError the legacy profile raises, carrying Retry-After,
+    rather than the generic 'unexpected status 429' transport error."""
+    from mudraid.exceptions import MudraIDRateLimitedError
+
+    rsps.add(
+        responses.POST,
+        TOKEN_ENDPOINT,
+        json={"error_code": "RATE_LIMITED", "detail": "slow down"},
+        status=429,
+        headers={"Retry-After": "17"},
+    )
+    with pytest.raises(MudraIDRateLimitedError) as exc:
+        MachineTokenManager(_identity()).get_token()
+    assert exc.value.retry_after_seconds == 17
+    assert "Retry after 17s" in str(exc.value)
+    assert "per-api_key_id budget" in str(exc.value)
+    assert "unexpected status" not in str(exc.value)
+
+
+def test_429_without_retry_after_reports_an_unknown_wait(
+    rsps: responses.RequestsMock,
+) -> None:
+    """Pre-launch scan SSC-11 — absence is an absence, never a guessed number."""
+    from mudraid.exceptions import MudraIDRateLimitedError
+
+    rsps.add(responses.POST, TOKEN_ENDPOINT, json={"error": "slow_down"}, status=429)
+    with pytest.raises(MudraIDRateLimitedError) as exc:
+        MachineTokenManager(_identity()).get_token()
+    assert exc.value.retry_after_seconds is None
+    assert "no Retry-After" in str(exc.value)
+
+
+def test_402_maps_to_the_typed_billing_frozen_error(rsps: responses.RequestsMock) -> None:
+    """Pre-launch scan SSC-11 — a billing refusal is not transient; it must
+    not be raised as the class the docs say to retry with backoff."""
+    from mudraid.exceptions import MudraIDBillingFrozenError
+
+    rsps.add(
+        responses.POST,
+        TOKEN_ENDPOINT,
+        json={
+            "error": "invalid_client",
+            "error_description": "This account is frozen; see Billing in the portal.",
+        },
+        status=402,
+    )
+    with pytest.raises(MudraIDBillingFrozenError) as exc:
+        MachineTokenManager(_identity()).get_token()
+    assert "This account is frozen" in str(exc.value)
+    assert "cannot clear" in str(exc.value)
+
+
+def test_402_with_no_body_still_maps_to_billing_frozen(rsps: responses.RequestsMock) -> None:
+    from mudraid.exceptions import MudraIDBillingFrozenError
+
+    rsps.add(responses.POST, TOKEN_ENDPOINT, body="", status=402)
+    with pytest.raises(MudraIDBillingFrozenError, match="sent no explanation"):
+        MachineTokenManager(_identity()).get_token()

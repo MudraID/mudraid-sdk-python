@@ -33,13 +33,28 @@ from typing import Any
 import requests
 
 from mudraid._consequence import IDEMPOTENCY_KEY_HEADER, execute, is_idempotent
-from mudraid._machine_auth import MachineIdentity, MachineTokenManager
+from mudraid._machine_auth import AssertionSigner, MachineIdentity, MachineTokenManager
+from mudraid._machine_env import load_machine_identity
 
 _logger = logging.getLogger("mudraid.machine_agent")
 
 
 class MachineAgent:
     """Authenticated, consequence-safe HTTP client for one machine identity."""
+
+    @classmethod
+    def from_env(
+        cls, prefix: str = "MUDRAID", *, signer: AssertionSigner | None = None
+    ) -> MachineAgent:
+        """Construct V2 from explicit prefixed environment variables.
+
+        Requires CLIENT_ID, TOKEN_ENDPOINT, ASSERTION_AUDIENCE and RESOURCE.
+        SCOPES is space-separated; missing or empty requests no scopes. Supply
+        PRIVATE_KEY_PATH and KEY_ID for the built-in RS256 signer, or pass an
+        explicit signer (for example, backed by KMS). No .env file is loaded,
+        no legacy keys are read and no request is sent during construction.
+        """
+        return cls(load_machine_identity(prefix, signer=signer))
 
     def __init__(
         self,

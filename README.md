@@ -13,13 +13,13 @@ secrets in code.
 import requests
 response = requests.get("https://api.skyscanner.com/flights")
 
-# After
+# After — legacy direct-permission profile
 from mudraid import Agent
 agent = Agent()  # auto-loads credentials from .env
 response = agent.get("https://api.skyscanner.com/flights")
 ```
 
-That's the entire integration diff.
+That example uses legacy direct platform permissions. A linked OAuth Machine Client uses the V2 setup below.
 
 ### Which client to use
 
@@ -43,9 +43,71 @@ The legacy profile will be deprecated with a runtime warning and a migration
 window before any removal; `Agent.legacy()` names the choice explicitly at the
 call site if you want it pinned.
 
+### Linked OAuth Machine Client (V2)
+
+Use `MachineAgent` when the portal grants authority to an OAuth Machine Client.
+`Agent(prefix=...)` always selects legacy key/secret authentication; linking a
+client in the portal does not switch that Python object to V2. A refresh of
+legacy discovery cannot load a V2 grant. You do not need a legacy direct grant
+for this flow.
+
+Install `mudraid-sdk[v2]`. Use the runnable
+[linked-client example](examples/linked_machine_client.py), configuring:
+
+| Variable | Value |
+|---|---|
+| `MUDRAID_CLIENT_ID` | The linked OAuth client ID |
+| `MUDRAID_PRIVATE_KEY_PATH` | Local path to the private key corresponding to its registered public key |
+| `MUDRAID_KEY_ID` | That registered key's `kid` |
+| `MUDRAID_TOKEN_ENDPOINT` | Your environment's `/oauth2/token` URL |
+| `MUDRAID_ASSERTION_AUDIENCE` | The assertion audience required by that authorization server |
+| `MUDRAID_RESOURCE` | The exact approved resource identifier |
+| `MUDRAID_SCOPES` | Explicit space-separated scopes, for example `tasks:read` |
+| `MUDRAID_TASKS_URL` | The task API URL served by that approved resource |
+
+With these variables set, the supported SDK entry point is:
+
+```python
+from mudraid import MachineAgent
+
+agent = MachineAgent.from_env()
+try:
+    response = agent.get("https://your-approved-platform.example/tasks", timeout=15)
+    response.raise_for_status()
+finally:
+    agent.close()
+```
+
+Use the URL served by your approved resource. You can also run
+`python examples/linked_machine_client.py` from the source distribution.
+For multiple agents, call `MachineAgent.from_env("WEBSITE_API")` and configure
+the corresponding `WEBSITE_API_*` variables. The loader reads only the process
+environment: it does not discover a `.env` file or use unprefixed fallbacks.
+Missing identity configuration fails locally rather than selecting another
+identity or a legacy credential. An omitted or empty `SCOPES` requests no
+scopes; it never means all permissions. Set the scopes needed for your call.
+For a custom or KMS-backed signer, use
+`MachineAgent.from_env("WEBSITE_API", signer=my_signer)`; then local key-file
+variables are unnecessary. The built-in key-file path uses RS256; callers
+requiring ES256 can supply an explicitly configured `PyJWTSigner` instead.
+
+`from_env` is included in this source version and its release artifacts; an
+older installed SDK may not contain it. Verify the published package version
+before copying this example. Public repository mirroring and package release
+are separate from merging changes into the backend repository.
+The private key remains local; the SDK signs an assertion, obtains a
+resource-bound token, then calls the platform.
+
+The client must have an effective grant for the requested resource/scopes,
+valid agent binding and usable credentials in the correct organization and
+environment. Registration or linking alone grants no authority. Test V2 in
+sandbox before production; production eligibility remains enforced by the
+server. If token exchange refuses the request, inspect that refusal and the
+client's grant/binding rather than adding legacy permissions.
+
 ---
 
-## What the SDK actually does
+## What the legacy Agent does
 
 For every outgoing request the SDK:
 
@@ -99,7 +161,7 @@ pip install mudraid-sdk
 ```
 
 > **Which version this installs.** The latest on PyPI is **1.1.0**. This
-> source tree is **1.2.0**, which is not published yet — pinning `==1.2.0`
+> source tree is **1.3.0**, which is not published yet — pinning `==1.3.0`
 > would fail to resolve. Install unpinned to get the current release, or pin
 > `==1.1.0` explicitly if you need a fixed version today.
 
@@ -293,6 +355,7 @@ Or catch specific subclasses for precise behaviour:
 | `MudraIDConfigError` | `MUDRAID_API_KEY_ID` / `MUDRAID_SECRET` missing or empty |
 | `MudraIDAuthError` | MudraID rejected the credentials (HTTP 401 from `/auth/token`) |
 | `MudraIDRevokedError` | Authorisation denied (HTTP 403: agent inactive, no platform access, scope rejected) |
+| `MudraIDProductionMachineClientRequiredError` | The surface is **production** and a native `api_key_id` + `secret` is not a production credential (HTTP 403 `production_machine_client_required`). Subclasses `MudraIDRevokedError`; carries `recommended_authentication_method` (`private_key_jwt`) and `compatibility_authentication_available`. A retry with the same credential cannot succeed — use `MachineAgent` |
 | `MudraIDNetworkError` | Could not reach MudraID, response was malformed, or an unmapped non-2xx (the message names the path and `base_url`) |
 | `MudraIDRateLimitedError` | MudraID rate-limited the call (HTTP 429). Subclasses `MudraIDNetworkError`; carries `retry_after_seconds` |
 | `MudraIDPlatformNotRegisteredError` | Caller URL's host isn't a platform this agent is registered with |
@@ -405,15 +468,59 @@ echoed into the error message.
 Calls to *your platforms* are unaffected — those go through a separate session
 and follow redirects as `requests` normally would.
 
+### Production surfaces are reached by a machine client, not by an agent secret
+
+A native agent credential (`api_key_id` + `secret`) mints tokens for
+**sandbox** and **staging** surfaces. On a surface whose registered environment
+is **production**, MudraID decides the mint by the surface's stored
+environment — never by anything the request claims — and refuses the native
+credential with a typed `403` whose `code` is
+`production_machine_client_required`. The SDK raises
+`MudraIDProductionMachineClientRequiredError` (a subclass of
+`MudraIDRevokedError`, so existing handlers keep working) carrying the server's
+`recommended_authentication_method` — `private_key_jwt` — and whether the
+compatibility method is available. Nothing about a retry can clear it: the
+remedy is a different credential, which is `MachineAgent`.
+
+While the floor is being rolled out the server may run it in **shadow** mode,
+recording the decision and still issuing the token; do not write code that
+depends on the native mint continuing to succeed on a production surface.
+
+What a production client looks like, and what it never does:
+
+* **`private_key_jwt` is the recommended method.** The private key stays with
+  you; MudraID holds only the public JWK and verifies a short-lived,
+  single-use assertion signed with **`RS256`** or **`ES256`** (the exact list
+  the server advertises). A key is activated by proof of possession — a
+  challenge you sign with the private key — and rotated by registering the
+  next key, activating it the same way, and retiring the old one; the SDK
+  never sees, stores or transmits the private key.
+* **`client_secret_basic` is the compatibility method.** It is permitted in
+  production only while your organization holds a recorded, unexpired
+  compatibility approval, and that approval is re-checked on **every** token
+  request — the moment it lapses or is revoked the same secret is refused
+  with a uniform `invalid_client`. The secret is disclosed **exactly once**,
+  in the response that creates or rotates it, and is never readable again;
+  rotation issues a new secret with a bounded overlap for the old one.
+* **There is no downgrade.** A client registered with `private_key_jwt`
+  cannot be switched to a shared secret; a secret-authenticated client cannot
+  present a key. The method chosen at registration is the method the token
+  endpoint enforces.
+
 ### `PyJWTSigner` signs asymmetrically or not at all
 
 `private_key_jwt` exists so no shared secret crosses the wire. PyJWT will
 nonetheless encode `alg=none` (unsigned) or `HS256` (symmetric — your "private
 key" becomes a secret the server must also hold), either of which dissolves the
 profile without changing anything visible at the call site. `PyJWTSigner`
-therefore accepts only `RS*`, `PS*`, `ES*` and `EdDSA`, and raises `ValueError`
-otherwise. Supply your own `AssertionSigner` if you genuinely need something
-else — there the choice is yours and it is visible.
+therefore accepts exactly the two algorithms MudraID verifies — **`RS256`** and
+**`ES256`** — and raises `ValueError` for anything else. That includes the
+other asymmetric algorithms PyJWT can encode (`RS384`, `RS512`, `PS*`,
+`ES384`, `ES512`, `ES256K`, `EdDSA`): they would sign a well-formed assertion
+the token endpoint refuses with a uniform `invalid_client` that says nothing,
+so the SDK refuses them early and says why. Supply your own `AssertionSigner`
+if you genuinely need something else — there the choice is yours and it is
+visible.
 
 ---
 

@@ -25,6 +25,7 @@ from mudraid.exceptions import (
     MudraIDAuthError,
     MudraIDBillingFrozenError,
     MudraIDNetworkError,
+    MudraIDProductionMachineClientRequiredError,
     MudraIDRateLimitedError,
     MudraIDRevokedError,
 )
@@ -66,10 +67,41 @@ def _error_code(response: requests.Response) -> str | None:
     except ValueError:
         return None
     if isinstance(body, dict):
-        code = body.get("error_code")
-        if isinstance(code, str) and code:
-            return code
+        # Two spellings, one meaning. The rate-limit and fair-use refusals
+        # render `error_code`; the typed refusals raised through identity's
+        # CodedHTTPException (the production credential floor among them)
+        # render `code`. Both are identity describing its own decision.
+        for key in ("error_code", "code"):
+            code = body.get(key)
+            if isinstance(code, str) and code:
+                return code
     return None
+
+
+# identity-service's production credential floor (KAN-171): a native agent
+# credential asked to mint on a surface whose stored environment is
+# production. Rendered through CodedHTTPException, so the code arrives as
+# `code`, beside two guidance members.
+_PRODUCTION_MACHINE_CLIENT_REQUIRED_CODE = "production_machine_client_required"
+
+
+def _production_floor_guidance(
+    response: requests.Response,
+) -> tuple[str | None, bool | None]:
+    """The two guidance members of the production refusal, read only when
+    the server sent them. Absent is ``None``, never an assumed value."""
+    try:
+        body = response.json()
+    except ValueError:
+        return None, None
+    if not isinstance(body, dict):
+        return None, None
+    recommended = body.get("recommended_authentication_method")
+    available = body.get("compatibility_authentication_available")
+    return (
+        recommended if isinstance(recommended, str) and recommended else None,
+        available if isinstance(available, bool) else None,
+    )
 
 
 # identity-service's per-api_key_id limiter, shared by /auth/token,
@@ -158,6 +190,55 @@ def _rate_limit_attribution(response: requests.Response) -> str:
     )
 
 
+def billing_frozen_error(
+    response: requests.Response, *, label: str, detail: str | None = None
+) -> MudraIDBillingFrozenError:
+    """The typed 402, built once for both profiles (pre-launch scan SSC-11).
+
+    ``label`` names what was refused as it reads in the sentence — the path
+    for the legacy profile, "the token request" for V2 — and ``detail`` is the
+    server's own sentence when the caller already extracted one (the OAuth
+    ``error_description``); otherwise the JSON ``detail`` is read here.
+    """
+    detail = detail or _safe_detail(response)
+    if detail:
+        return MudraIDBillingFrozenError(
+            f"MudraID refused {label} on this account's billing state: {detail} "
+            "A retry on its own cannot clear this — the freeze has to be "
+            "lifted first."
+        )
+    # No usable body: say what the status means and where to look, and do NOT
+    # name the specific state. `frozen` is the server's word for one of the
+    # things that answers 402; with nothing on the wire the SDK does not get
+    # to claim which.
+    return MudraIDBillingFrozenError(
+        f"MudraID answered 402 for {label} and sent no explanation. "
+        "That status is about this account's plan and billing state, not "
+        "about this request — a retry on its own cannot clear it. Check "
+        "Billing in the MudraID portal."
+    )
+
+
+def rate_limited_error(response: requests.Response, *, label: str) -> MudraIDRateLimitedError:
+    """The typed 429, built once for both profiles (pre-launch scan SSC-11).
+
+    Carries ``Retry-After`` as a number when the server sent one, and attributes
+    the limiter only on the body's own evidence (:func:`_rate_limit_attribution`).
+    ``label`` reads as the object of "rate-limited" — "this request to <path>"
+    for the legacy profile, "the token request" for V2.
+    """
+    retry_after = _retry_after_seconds(response)
+    wait = (
+        f" Retry after {retry_after}s."
+        if retry_after is not None
+        else " The server sent no Retry-After, so the length is unknown."
+    )
+    return MudraIDRateLimitedError(
+        f"MudraID rate-limited {label}.{wait}{_rate_limit_attribution(response)}",
+        retry_after_seconds=retry_after,
+    )
+
+
 def _safe_detail(response: requests.Response) -> str | None:
     """Best-effort extraction of the server's `detail` field.
 
@@ -217,7 +298,10 @@ class MudraIDHttpClient:
             server's ``detail`` when present — the account's plan refused,
             not the request.
           * 403 → :class:`MudraIDRevokedError`, message taken from the
-            server's ``detail`` when present.
+            server's ``detail`` when present; a 403 carrying
+            ``code: production_machine_client_required`` is its subclass
+            :class:`MudraIDProductionMachineClientRequiredError`, carrying
+            the server's recommended authentication method.
           * Network failure / timeout / non-JSON / other non-2xx →
             :class:`MudraIDNetworkError`.
 
@@ -253,8 +337,26 @@ class MudraIDHttpClient:
             # Chain the underlying transport error for debuggability,
             # but keep the surfaced message generic so it never echoes
             # the request body.
+            #
+            # WHEN THE HOST IS THE COMPILED-IN DEFAULT, SAY SO (pre-launch scan
+            # SSC-17). No single default host is right for every environment —
+            # the credential screen prints the one that is — so an unconfigured
+            # SDK failing to connect is a configuration fact, not the transient
+            # transport fault this class otherwise describes, and the message
+            # names the setting rather than leaving the reader to retry DNS.
+            unconfigured = (
+                (
+                    " MUDRAID_BASE_URL is not set, so the SDK fell back to its "
+                    "compiled-in default, which may not be the environment your "
+                    "credentials belong to. Take the base URL from the credential "
+                    "screen in the MudraID portal and set MUDRAID_BASE_URL (or pass "
+                    "base_url= to Agent())."
+                )
+                if self._config.base_url_defaulted
+                else ""
+            )
             raise MudraIDNetworkError(
-                f"could not reach MudraID at {self._config.base_url}"
+                f"could not reach MudraID at {self._config.base_url}.{unconfigured}"
             ) from exc
 
         _logger.debug("MudraID returned %d for %s", response.status_code, path)
@@ -262,11 +364,31 @@ class MudraIDHttpClient:
         if response.status_code == 401:
             raise MudraIDAuthError("invalid credentials")
         if response.status_code == 403:
-            detail = _safe_detail(response) or (
-                "agent not authorized for this MudraID call; check platform "
-                "grants in the MudraID portal"
+            detail = _safe_detail(response)
+            if _error_code(response) == _PRODUCTION_MACHINE_CLIENT_REQUIRED_CODE:
+                # THE ONE 403 WHOSE REMEDY IS NOT "CHECK YOUR GRANTS". The
+                # agent is assigned and its credential was accepted; the
+                # surface is production and a native credential is not a
+                # production credential. The server names the way in, and
+                # the SDK carries it rather than replacing it with the
+                # generic grants sentence, which would send the reader to a
+                # screen that cannot fix this.
+                guidance = _production_floor_guidance(response)
+                raise MudraIDProductionMachineClientRequiredError(
+                    (detail or "MudraID refused a native agent credential on a production surface.")
+                    + f" Recommended: authenticate as a linked machine client with "
+                    f"{guidance[0] or 'private_key_jwt'} (mudraid.MachineAgent). A retry "
+                    "with the same credential cannot succeed.",
+                    recommended_authentication_method=guidance[0],
+                    compatibility_authentication_available=guidance[1],
+                )
+            raise MudraIDRevokedError(
+                detail
+                or (
+                    "agent not authorized for this MudraID call; check platform "
+                    "grants in the MudraID portal"
+                )
             )
-            raise MudraIDRevokedError(detail)
         if response.status_code == 402:
             # THE LIMIT THE PRODUCT ACTUALLY IMPOSES, AND THE LAST CONTROL-PLANE
             # STATUS WITH NO BRANCH. Identity-service answers 402 when the
@@ -282,23 +404,7 @@ class MudraIDHttpClient:
             # The server sends the remedy AND the screen it lives on. The SDK is
             # the only channel the integrator has — there is no dashboard in the
             # room — so the sentence is carried through rather than replaced.
-            detail = _safe_detail(response)
-            if detail:
-                raise MudraIDBillingFrozenError(
-                    f"MudraID refused {path} on this account's billing state: {detail} "
-                    "A retry on its own cannot clear this — the freeze has to be "
-                    "lifted first."
-                )
-            # No usable body: say what the status means and where to look, and
-            # do NOT name the specific state. `frozen` is the server's word for
-            # one of the things that answers 402; with nothing on the wire the
-            # SDK does not get to claim which.
-            raise MudraIDBillingFrozenError(
-                f"MudraID answered 402 for {path} and sent no explanation. "
-                "That status is about this account's plan and billing state, not "
-                "about this request — a retry on its own cannot clear it. Check "
-                "Billing in the MudraID portal."
-            )
+            raise billing_frozen_error(response, label=path)
         if response.status_code == 429:
             # The credentials were never examined, so this is emphatically NOT
             # an auth failure — "unexpected status 429" invited exactly that
@@ -320,17 +426,7 @@ class MudraIDHttpClient:
             # real limit was their account plan or a shared egress IP — a
             # confident wrong answer, which is worse than the vague one it
             # replaced.
-            retry_after = _retry_after_seconds(response)
-            wait = (
-                f" Retry after {retry_after}s."
-                if retry_after is not None
-                else " The server sent no Retry-After, so the length is unknown."
-            )
-            raise MudraIDRateLimitedError(
-                f"MudraID rate-limited this request to {path}.{wait}"
-                f"{_rate_limit_attribution(response)}",
-                retry_after_seconds=retry_after,
-            )
+            raise rate_limited_error(response, label=f"this request to {path}")
         if 300 <= response.status_code < 400:
             # Not followed (see the allow_redirects note above). Reported as its
             # own diagnosis rather than folded into "unexpected status", because

@@ -26,11 +26,10 @@ class MudraIDError(Exception):
 class MudraIDConfigError(MudraIDError):
     """Configuration error — missing or invalid SDK initialisation state.
 
-    Raised at :class:`mudraid.Agent` construction when
-    ``MUDRAID_API_KEY_ID`` or ``MUDRAID_SECRET`` cannot be resolved
-    from explicit arguments, the OS environment, or a ``.env`` file.
-    The message lists the missing variables so recovery is one step
-    away.
+    Raised when SDK configuration is missing or unusable. The V2
+    :meth:`mudraid.MachineAgent.from_env` loader names the affected variable
+    without including credential values or reading an implicit ``.env`` file.
+    The legacy Agent has its own key/secret configuration path.
     """
 
 
@@ -207,3 +206,47 @@ class MudraIDBillingFrozenError(MudraIDNetworkError):
     message says what the status means and where to look, and does **not**
     invent the specific state that produced it.
     """
+
+
+class MudraIDProductionMachineClientRequiredError(MudraIDRevokedError):
+    """The surface is PRODUCTION, and a native agent credential is not a
+    production credential.
+
+    Raised on HTTP 403 with ``code == "production_machine_client_required"``
+    from ``POST /api/v1/auth/token``. The credentials were accepted and the
+    agent is assigned to the surface; what was refused is the KIND of
+    credential. On a surface whose stored environment is ``production`` the
+    control plane issues tokens only to a linked machine client — the
+    recommended authentication method is ``private_key_jwt``
+    (:class:`mudraid.MachineAgent`), and ``client_secret_basic`` is available
+    only while the organization holds a recorded, unexpired compatibility
+    approval.
+
+    NOTHING ABOUT A RETRY CAN CLEAR THIS. The same credential against the
+    same surface refuses again, so a backoff loop is the wrong response; the
+    remedy is a different credential. The two fields the server sends with
+    the refusal are carried as attributes so a caller can act without parsing
+    the message:
+
+    * ``recommended_authentication_method`` — the server's recommendation,
+      ``"private_key_jwt"``.
+    * ``compatibility_authentication_available`` — ``True`` when the server
+      states the compatibility method is offered on this deployment; ``None``
+      when the field was absent, never a guessed boolean.
+
+    SUBCLASSES :class:`MudraIDRevokedError` DELIBERATELY: every 403 from the
+    control plane raised that class before this one existed, so code catching
+    it keeps catching this, and only code that WANTS the distinction has to
+    change.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        recommended_authentication_method: str | None = None,
+        compatibility_authentication_available: bool | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.recommended_authentication_method = recommended_authentication_method
+        self.compatibility_authentication_available = compatibility_authentication_available

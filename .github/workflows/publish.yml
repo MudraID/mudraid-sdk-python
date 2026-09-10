@@ -225,11 +225,13 @@ jobs:
           print('PyJWT', jwt.__version__, '/ cryptography', cryptography.__version__)"
 
       - name: Test against the installed artifact
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.github:${{ github.workspace }}
         run: |
           # From /tmp, so the import resolves from site-packages rather than
           # from the source tree sitting in the working directory.
           cd /tmp && /tmp/clean/bin/python -c "import mudraid; print(mudraid.__version__)"
-          cd ${{ github.workspace }} && /tmp/clean/bin/python -m pytest tests/unit -q
+          cd ${{ github.workspace }} && /tmp/clean/bin/python -m pytest tests/unit -q -o pythonpath= --import-mode=importlib -p installed_artifact_guard
 
       # Inventoried from the venv the tests just ran in, on one interpreter
       # rather than four. That is not a shortcut: an SBOM generated from a

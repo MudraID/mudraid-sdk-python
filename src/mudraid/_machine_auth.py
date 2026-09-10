@@ -37,6 +37,7 @@ from typing import Any, Mapping, Protocol
 
 import requests
 
+from mudraid._http import billing_frozen_error, rate_limited_error
 from mudraid._scopes import RequestedScopes
 from mudraid.exceptions import (
     MudraIDAuthError,
@@ -279,11 +280,25 @@ class MachineTokenManager:
           * 400 ``invalid_scope`` / ``invalid_target`` / ``invalid_request`` /
             ``unsupported_grant_type`` → :class:`MudraIDRevokedError` (an
             authority/protocol refusal, carrying the server's description).
+          * 402 → :class:`MudraIDBillingFrozenError`; 429 →
+            :class:`MudraIDRateLimitedError` with ``retry_after_seconds`` — the
+            SAME typed errors the legacy profile raises, built by the shared
+            helpers in :mod:`mudraid._http`, so a billing freeze is never read
+            as the "retry with backoff" transport error (pre-launch scan
+            SSC-11).
           * anything else / non-JSON / transport → :class:`MudraIDNetworkError`.
         """
         status = response.status_code
         if status == 401:
             raise MudraIDAuthError("client authentication failed at the token endpoint")
+        if status == 402:
+            # The OAuth body carries its sentence as error_description rather
+            # than detail; hand it through so the remedy the server named is
+            # the one the integrator reads.
+            _, description = _safe_oauth_error(response)
+            raise billing_frozen_error(response, label="the token request", detail=description)
+        if status == 429:
+            raise rate_limited_error(response, label="the token request")
         if 300 <= status < 400:
             raise MudraIDNetworkError(
                 f"the token endpoint at {self._identity.token_endpoint} answered "
@@ -378,13 +393,30 @@ def _safe_oauth_error(response: requests.Response) -> tuple[str | None, str | No
 #: Neither is a configuration this SDK has a reason to allow, so neither is
 #: reachable. An integrator who needs something else supplies their own
 #: :class:`AssertionSigner`, where the choice is theirs and is visible.
-_PERMITTED_ASSERTION_ALGORITHMS = frozenset(
-    {
-        "RS256", "RS384", "RS512",
-        "PS256", "PS384", "PS512",
-        "ES256", "ES384", "ES512", "ES256K",
-        "EdDSA",
-    }
+#:
+#: EXACTLY THE TWO THE SERVER VERIFIES, AND NOT ONE MORE (KAN-171). This set
+#: used to list eleven asymmetric algorithms -- every RS*, PS*, ES* and EdDSA
+#: PyJWT can encode -- and the server verifies precisely two of them: RS256
+#: (RSASSA-PKCS1-v1_5/SHA-256) and ES256 (ECDSA P-256/SHA-256, raw ``r||s``).
+#: Key registration accepts the same two. So nine of the eleven were a promise
+#: this SDK could not keep: a client configured with ``PS384`` would sign a
+#: perfectly well-formed assertion and be refused with the uniform
+#: ``invalid_client``, an error that -- by design -- does not say why. The
+#: client library is the one place that can refuse EARLY and say why, and an
+#: "asymmetric-only" rule that admits algorithms the far end cannot check is
+#: not a security property, it is a list.
+#:
+#: This is the CLIENT'S advertised set. Widening it is not an SDK change; it
+#: is a server change (verifier, key registration, metadata, contract and
+#: tests together), after which this constant follows.
+_PERMITTED_ASSERTION_ALGORITHMS = frozenset({"RS256", "ES256"})
+
+#: The asymmetric algorithms PyJWT can encode that the server does NOT verify.
+#: Named so the refusal can say "asymmetric, but not supported here" rather
+#: than lumping a reasonable ES384 choice in with ``none`` -- the two mistakes
+#: deserve different sentences, because they call for different fixes.
+_UNSUPPORTED_ASYMMETRIC_ALGORITHMS = frozenset(
+    {"RS384", "RS512", "PS256", "PS384", "PS512", "ES384", "ES512", "ES256K", "EdDSA"}
 )
 
 
@@ -404,6 +436,18 @@ class PyJWTSigner:
     def __init__(self, private_key: Any, *, kid: str, algorithm: str = "RS256") -> None:
         if not kid or not isinstance(kid, str):
             raise ValueError("kid is required so the server can select the verifying key")
+        if algorithm in _UNSUPPORTED_ASYMMETRIC_ALGORITHMS:
+            # Asymmetric and well-formed, so worth a different sentence from
+            # the one below: the far end would refuse this with a uniform
+            # invalid_client that says nothing, and this is the only place
+            # that can say it early.
+            raise ValueError(
+                f"{algorithm!r} is not a permitted client-assertion algorithm. "
+                "It is asymmetric, but MudraID verifies exactly RS256 and ES256, "
+                "and an assertion signed with anything else is refused at the "
+                "token endpoint with a uniform invalid_client. Choose one of "
+                f"{sorted(_PERMITTED_ASSERTION_ALGORITHMS)}."
+            )
         if algorithm not in _PERMITTED_ASSERTION_ALGORITHMS:
             raise ValueError(
                 f"{algorithm!r} is not a permitted client-assertion algorithm. "

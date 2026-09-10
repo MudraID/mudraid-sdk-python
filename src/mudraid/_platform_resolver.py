@@ -75,9 +75,13 @@ class PlatformResolver:
         platform_id = mapping.get(host)
         if platform_id is None:
             raise MudraIDPlatformNotRegisteredError(
-                f"Host '{host}' is not in this agent's registered platforms. "
-                "Grant the platform to the agent in the MudraID portal and "
-                "call Agent.refresh_platforms() (or recreate the Agent)."
+                f"Host '{host}' has no usable direct platform permission for the "
+                "legacy Agent profile. Linked OAuth Machine Client grants are "
+                "not discovered by Agent(prefix=...). For V2 grants, use "
+                "MachineAgent with MachineIdentity (client ID, registered key "
+                "signer, token endpoint/audience, resource and explicit scopes). "
+                "For an intentional legacy integration, grant direct platform "
+                "permission and call Agent.refresh_platforms()."
             )
         return platform_id
 

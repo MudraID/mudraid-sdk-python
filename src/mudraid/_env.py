@@ -182,6 +182,11 @@ class SdkConfig:
     api_key_id: str
     secret: str
     base_url: str
+    # Whether ``base_url`` is the compiled-in default rather than a value the
+    # integrator chose (kwarg, env or .env). A transport failure against the
+    # default is a configuration fact and is reported as one (pre-launch scan
+    # SSC-17); the same host set deliberately is not second-guessed.
+    base_url_defaulted: bool = False
 
 
 def _normalize_prefix(prefix: str) -> str:
@@ -260,13 +265,13 @@ def load_config(
     # type so ``.strip()`` is callable. The behaviour is unchanged.
     resolved_id: str = (api_key_id or os.environ.get(env_api_key_id) or "").strip()
     resolved_secret: str = (secret or os.environ.get(env_secret) or "").strip()
-    resolved_url = (
+    configured_url = (
         base_url
         or os.environ.get(env_base_url, "").strip()
         # The global base URL backstops every prefix — see the docstring.
         or os.environ.get(_ENV_BASE_URL, "").strip()
-        or DEFAULT_BASE_URL
     )
+    resolved_url = configured_url or DEFAULT_BASE_URL
 
     missing: list[str] = []
     if not resolved_id:
@@ -284,6 +289,7 @@ def load_config(
         api_key_id=resolved_id,
         secret=resolved_secret,
         base_url=_validate_base_url(resolved_url.rstrip("/")),
+        base_url_defaulted=not configured_url,
     )
     # api_key_id is the *public* half of the credential pair — safe to
     # log. The secret is referenced only by presence, never by value.
