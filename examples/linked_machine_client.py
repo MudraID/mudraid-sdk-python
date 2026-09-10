@@ -1,7 +1,7 @@
-"""V2 linked Machine Client example. Install mudraid-sdk[v2] first.
+"""Linked Machine Client example. Install mudraid-sdk first.
 
 Configure the prefixed variables described in README.md. Linking the client
-in the portal does not change an existing legacy Agent instance.
+and approve a bounded resource grant before calling the platform.
 """
 
 import os

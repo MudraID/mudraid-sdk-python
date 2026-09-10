@@ -1,23 +1,13 @@
-"""mudraid — Python SDK for MudraID.
+"""MudraID SDK: linked OAuth authority for outbound agent requests.
 
-Two auth profiles are exposed:
-
-  * :class:`Agent` — the *legacy* profile: a drop-in replacement for ``requests``
-    that authenticates with an api_key_id/secret pair and routes per registered
-    platform. Retained additively; see :meth:`Agent.legacy` and the class
-    docstring's retirement policy.
-  * :class:`MachineAgent` — the *V2 machine-authority* profile:
-    ``private_key_jwt`` client-assertion auth with explicit audience + scopes,
-    resource/scope-bound access tokens, and consequence-safe retry. An omitted
-    scope set is the empty (minimal) set — never a wildcard — and a consequential
-    call whose outcome is unknown is never blindly replayed.
+Agent and MachineAgent use the same implementation and explicit grants.
 """
 
-from mudraid._agent import Agent
 from mudraid._consequence import IDEMPOTENCY_KEY_HEADER, is_idempotent
 from mudraid._machine_agent import MachineAgent
 from mudraid._machine_auth import (
     AssertionSigner,
+    ClientSecretIdentity,
     MachineIdentity,
     MachineTokenManager,
     PyJWTSigner,
@@ -31,19 +21,18 @@ from mudraid.exceptions import (
     MudraIDError,
     MudraIDExecutionUnknownError,
     MudraIDNetworkError,
-    MudraIDPlatformNotRegisteredError,
-    MudraIDProductionMachineClientRequiredError,
     MudraIDRateLimitedError,
     MudraIDRevokedError,
     MudraIDScopeError,
 )
 
+Agent = MachineAgent
+
 __all__ = [
-    # Legacy profile
     "Agent",
-    # V2 machine-authority profile
     "MachineAgent",
     "MachineIdentity",
+    "ClientSecretIdentity",
     "MachineTokenManager",
     "AssertionSigner",
     "PyJWTSigner",
@@ -57,12 +46,10 @@ __all__ = [
     "MudraIDAuthError",
     "MudraIDRevokedError",
     "MudraIDNetworkError",
-    "MudraIDPlatformNotRegisteredError",
     "MudraIDRateLimitedError",
     "MudraIDScopeError",
     "MudraIDBillingFrozenError",
-    "MudraIDProductionMachineClientRequiredError",
     "MudraIDExecutionUnknownError",
 ]
 
-__version__ = "1.3.0"
+__version__ = "2.0.0"

@@ -1,24 +1,14 @@
 """V2 machine-authority auth — ``private_key_jwt`` against ``POST /oauth2/token``.
 
-This is the newer way an agent obtains authority. Where the
-legacy profile posts a plaintext ``secret`` to ``/api/v1/auth/token`` and lets an
-empty ``scopes`` list expand to the agent's *full* permitted set, the V2 profile:
-
-  * authenticates with a **``private_key_jwt`` client assertion** — a short-lived
-    JWT the client signs with its own private key, so no long-lived shared secret
-    ever crosses the wire (RFC 7523);
-  * names an **explicit audience** (the assertion's ``aud`` — the token
-    endpoint's own identifier, per doc 02 §8) and an explicit **resource**
-    indicator (RFC 8707) the issued token is bound to;
-  * requests **explicit scopes**, and — crucially — sends *no* ``scope`` field
-    when none were named, so an omission is the empty (minimal) set and can never
-    broaden to "everything" (see :mod:`mudraid._scopes`).
+The SDK authenticates using an asymmetric private_key_jwt assertion, requests
+an explicit resource and scopes, and caches short-lived access tokens. Missing
+scopes request the empty set, never the client's full grant.
 
 Signing is pluggable through :class:`AssertionSigner` so the SDK core carries no
 crypto dependency: an integrator supplies a signer (the optional ``[v2]`` extra
 ships :class:`PyJWTSigner`, and tests inject a fake). The manager itself is
 JWT-blind about the *access* token it receives — it trusts the endpoint's
-``expires_in`` and never decodes the token, mirroring the legacy TokenManager.
+``expires_in`` and never decodes the token, without interpreting its claims.
 
 Secret-safety: the signed assertion and the issued access token are credentials.
 They are never logged, never placed in an exception message, and never exposed
@@ -33,7 +23,7 @@ import logging
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol
 from urllib.parse import urlsplit
 
@@ -156,6 +146,32 @@ class MachineIdentity:
             raise ValueError("assertion_ttl_seconds must be positive")
 
 
+@dataclass(frozen=True)
+class ClientSecretIdentity:
+    """A resource-scoped OAuth client authenticated using HTTP Basic.
+
+    Secret is excluded from representations. Server-side policy and approval
+    requirements still apply; this identity never falls back to signing keys.
+    """
+
+    client_id: str
+    token_endpoint: str
+    resource: str
+    client_secret: str = field(repr=False)
+    scopes: RequestedScopes = RequestedScopes.of(None)
+
+    def __post_init__(self) -> None:
+        for name in ("client_id", "token_endpoint", "resource", "client_secret"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise MudraIDConfigError(f"ClientSecretIdentity.{name} is required")
+        if ":" in self.client_id:
+            raise MudraIDConfigError(
+                "client_id cannot contain a colon for HTTP Basic authentication"
+            )
+        _validate_token_endpoint(self.token_endpoint)
+
+
 def build_client_assertion_claims(
     identity: MachineIdentity, *, now: float | None = None
 ) -> dict[str, Any]:
@@ -192,7 +208,7 @@ class _MachineToken:
 class MachineTokenManager:
     """Acquire / cache / refresh one machine client's V2 access token.
 
-    Lifecycle mirrors the legacy TokenManager — cache until near-expiry (with a
+    Cache until near-expiry (with a
     clock-skew leeway), re-acquire on expiry, and force a fresh mint on
     :meth:`refresh` (used by the 401 path so a revoked/expired token triggers a
     genuine re-acquire rather than silent reuse). One identity → one cached
@@ -201,7 +217,7 @@ class MachineTokenManager:
 
     def __init__(
         self,
-        identity: MachineIdentity,
+        identity: MachineIdentity | ClientSecretIdentity,
         *,
         session: requests.Session | None = None,
         timeout: float = _DEFAULT_TIMEOUT_SEC,
@@ -211,28 +227,32 @@ class MachineTokenManager:
         # A dedicated session for the token endpoint, distinct from the session
         # that carries the issued bearer to resource servers — the two have
         # different trust properties and must never share headers.
+        self._owns_session = session is None
         self._session = session or requests.Session()
         self._lock = threading.Lock()
         self._cached: _MachineToken | None = None
 
+    def close(self) -> None:
+        """Release owned connections; a supplied session remains caller-owned."""
+        self.clear()
+        if self._owns_session:
+            self._session.close()
+
     @property
-    def identity(self) -> MachineIdentity:
+    def identity(self) -> MachineIdentity | ClientSecretIdentity:
         return self._identity
 
     def get_token(self) -> str:
         """Return a non-expired access token, acquiring one if needed."""
-        now = time.time()
         with self._lock:
             cached = self._cached
-            if cached is not None and cached.is_fresh(now):
+            if cached is not None and cached.is_fresh(time.time()):
                 _logger.debug("machine token cache hit for client_id=%s", self._identity.client_id)
                 return cached.access_token
 
-        minted = self._acquire()
-        with self._lock:
-            existing = self._cached
-            if existing is not None and existing.is_fresh(time.time()):
-                return existing.access_token
+            # Serialize acquisition as well as cache updates: concurrent misses
+            # must not each spend the client's token-issuance budget.
+            minted = self._acquire()
             self._cached = minted
             return minted.access_token
 
@@ -244,10 +264,10 @@ class MachineTokenManager:
         surfaces here as a typed error rather than being silently reused.
         """
         _logger.info("refreshing machine token for client_id=%s", self._identity.client_id)
-        minted = self._acquire()
         with self._lock:
+            minted = self._acquire()
             self._cached = minted
-        return minted.access_token
+            return minted.access_token
 
     def clear(self) -> None:
         """Drop the cached token; the next :meth:`get_token` re-acquires."""
@@ -259,33 +279,34 @@ class MachineTokenManager:
     def _acquire(self) -> _MachineToken:
         """Sign a fresh assertion and exchange it at the token endpoint."""
         _logger.info(
-            "acquiring V2 machine token for client_id=%s resource=%s",
+            "acquiring machine token for client_id=%s resource=%s",
             self._identity.client_id,
             self._identity.resource,
         )
-        claims = build_client_assertion_claims(self._identity)
-        assertion = self._identity.signer.sign(claims)
-        if not isinstance(assertion, str) or not assertion:
-            raise MudraIDNetworkError("assertion signer returned an empty client assertion")
-
-        # RFC 6749 form body. ``scope`` is included ONLY when scopes were
-        # explicitly named — an empty request omits the field entirely so it is
-        # read as least privilege, never as a request for full entitlement.
         form: dict[str, str] = {
             "grant_type": _GRANT_CLIENT_CREDENTIALS,
-            "client_assertion_type": _JWT_BEARER_ASSERTION_TYPE,
-            "client_assertion": assertion,
             "resource": self._identity.resource,
         }
+        transport: dict[str, Any] = {}
+        if isinstance(self._identity, ClientSecretIdentity):
+            transport["auth"] = requests.auth.HTTPBasicAuth(
+                self._identity.client_id, self._identity.client_secret
+            )
+        else:
+            claims = build_client_assertion_claims(self._identity)
+            assertion = self._identity.signer.sign(claims)
+            if not isinstance(assertion, str) or not assertion:
+                raise MudraIDNetworkError("assertion signer returned an empty client assertion")
+            form["client_assertion_type"] = _JWT_BEARER_ASSERTION_TYPE
+            form["client_assertion"] = assertion
+
         scope_param = self._identity.scopes.as_scope_param()
         if scope_param is not None:
             form["scope"] = scope_param
 
         # `data=` sends application/x-www-form-urlencoded. The body carries the
         # signed assertion — a credential — and is NEVER logged.
-        _logger.debug(
-            "POST %s (client_credentials, private_key_jwt)", self._identity.token_endpoint
-        )
+        _logger.debug("POST %s (client_credentials)", self._identity.token_endpoint)
         try:
             # allow_redirects=False: this body carries the signed client
             # assertion. The assertion's own ``aud`` binds it to the intended
@@ -299,6 +320,7 @@ class MachineTokenManager:
                 data=form,
                 timeout=self._timeout,
                 allow_redirects=False,
+                **transport,
             )
         except requests.RequestException as exc:
             raise MudraIDNetworkError(
@@ -320,7 +342,7 @@ class MachineTokenManager:
             authority/protocol refusal, carrying the server's description).
           * 402 → :class:`MudraIDBillingFrozenError`; 429 →
             :class:`MudraIDRateLimitedError` with ``retry_after_seconds`` — the
-            SAME typed errors the legacy profile raises, built by the shared
+            typed errors built by the shared
             helpers in :mod:`mudraid._http`, so a billing freeze is never read
             as the "retry with backoff" transport error (pre-launch scan
             SSC-11).
@@ -457,13 +479,12 @@ _UNSUPPORTED_ASYMMETRIC_ALGORITHMS = frozenset(
 
 
 class PyJWTSigner:
-    """An :class:`AssertionSigner` backed by PyJWT (optional ``[v2]`` extra).
+    """An :class:`AssertionSigner` backed by the standard PyJWT dependency.
 
     Signs each claim set with the client's private key and stamps the ``kid`` so
     the server can select the matching registered public key. PyJWT is imported
-    lazily so the SDK core keeps zero crypto dependencies; a missing PyJWT raises
-    a clear, actionable error rather than an obscure ``ImportError`` at call
-    time. The private key is held only on this instance and is never logged.
+    lazily; a missing dependency raises an actionable installation error.
+    The private key is held only on this instance and is never logged.
 
     ``algorithm`` is restricted to :data:`_PERMITTED_ASSERTION_ALGORITHMS` —
     asymmetric signatures only. See that constant for why.
@@ -502,8 +523,8 @@ class PyJWTSigner:
             import jwt  # noqa: PLC0415 - lazy so the core has no crypto dep
         except ImportError as exc:  # pragma: no cover - depends on optional extra
             raise MudraIDNetworkError(
-                "PyJWTSigner requires PyJWT; install the SDK's 'v2' extra "
-                "(pip install mudraid-sdk[v2]) or supply your own AssertionSigner"
+                "PyJWTSigner requires PyJWT; reinstall mudraid-sdk "
+                "or supply your own AssertionSigner"
             ) from exc
         return jwt.encode(
             dict(claims),

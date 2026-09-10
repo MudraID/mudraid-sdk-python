@@ -123,7 +123,7 @@ jobs:
         run: python .github/inspect_distribution.py
 
       # The dependency scan runs against a FROZEN resolution of the shipped
-      # install — `[v2]`, what a customer gets, not `[dev]` — and not against
+      # install — ``, what a customer gets, not `[dev]` — and not against
       # the environment pip-audit lives in. Otherwise pip-audit's own
       # dependency tree lands in the report, and a finding about a tool nobody
       # ships reads exactly like a finding about the package.
@@ -142,7 +142,7 @@ jobs:
         run: |
           python -m venv /tmp/shipped
           /tmp/shipped/bin/python -m pip install --upgrade pip
-          /tmp/shipped/bin/pip install "$(echo dist/*.whl)[v2]"
+          /tmp/shipped/bin/pip install "$(echo dist/*.whl)"
           /tmp/shipped/bin/pip freeze --exclude-editable \
             | grep -v '^mudraid-sdk @' > /tmp/shipped-requirements.txt
           cat /tmp/shipped-requirements.txt
@@ -196,29 +196,21 @@ jobs:
           /tmp/clean/bin/pip --version
           # The extras are applied TO THE WHEEL, not to `.`. That one character
           # is the difference between testing the artifact and testing the
-          # working directory: `pip install ".[v2,dev]"` would install the
+          # working directory: `pip install ".[dev]"` would install the
           # package from source and the wheel would never be exercised at all.
           #
-          # `v2` is here and not just `dev` because it is a SHIPPED extra that
-          # customers install (`pip install mudraid-sdk[v2]`) and it carries its
-          # own dependency floors. Testing only `[dev]` meant the one
-          # installation shape with crypto dependencies was never resolved by
-          # this pipeline — a conflict between those floors and the runtime deps
-          # would have surfaced for the first time on a customer's machine.
+          # Signing dependencies are standard runtime requirements. Install the
+          # built wheel with development tools for the full artifact test suite.
           #
           # Naming the test tools here instead would drift from pyproject.toml,
           # and the drift shows up as a collection error on release day — a
           # missing pytest-asyncio turns every async test into a silent non-run,
           # which is worse than a failure because the run still reports a
           # passing count.
-          /tmp/clean/bin/pip install "$(echo dist/*.whl)[v2,dev]"
+          /tmp/clean/bin/pip install "$(echo dist/*.whl)[dev]"
 
-      # The extra is only meaningful if it actually landed. Installing
-      # `[v2,dev]` and then running a suite that never imports jwt would report
-      # the same green whether the extra resolved or was quietly dropped from
-      # pyproject.toml, so this asks the question directly and fails the job on
-      # the answer rather than inferring it from a passing test count.
-      - name: Prove the v2 extra resolved
+      # Check the standard signing dependencies directly as well as testing them.
+      - name: Prove signing dependencies resolved
         run: >-
           cd /tmp && /tmp/clean/bin/python -c
           "import jwt, cryptography;

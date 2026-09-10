@@ -9,9 +9,7 @@ import pytest
 import responses
 
 from mudraid import (
-    Agent,
     MudraIDConfigError,
-    MudraIDPlatformNotRegisteredError,
     MudraIDRevokedError,
 )
 
@@ -104,29 +102,5 @@ def test_token_refusal_does_not_call_platform_or_fall_back(configured):
             with pytest.raises(MudraIDRevokedError):
                 agent.get(RESOURCE + "/tasks", timeout=15)
             assert [c.request.url for c in mock.calls] == [TOKEN]
-        finally:
-            agent.close()
-
-
-def test_legacy_empty_discovery_explains_linked_client_path():
-    agent = Agent(
-        api_key_id="test-legacy-id",
-        secret="test-legacy-secret",
-        base_url="https://identity.example.test",
-    )
-    with responses.RequestsMock() as mock:
-        mock.add(
-            responses.POST,
-            "https://identity.example.test/api/v1/auth/agents/me/platforms",
-            json={"platforms": []},
-        )
-        try:
-            with pytest.raises(MudraIDPlatformNotRegisteredError) as caught:
-                agent.get(RESOURCE + "/tasks")
-            message = str(caught.value)
-            assert "legacy Agent profile" in message
-            assert "MachineAgent with MachineIdentity" in message
-            assert "test-legacy-secret" not in message
-            assert len(mock.calls) == 1
         finally:
             agent.close()

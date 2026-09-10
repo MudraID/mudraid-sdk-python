@@ -21,7 +21,7 @@ try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10 — tomllib entered the stdlib in 3.11.
     # Same parser, pre-stdlib name. Declared in the [dev] extra for 3.10, so
-    # the wheel-test lane that installs `[v2,dev]` on every classifier-claimed
+    # the wheel-test lane that installs `[dev]` on every classifier-claimed
     # interpreter can collect this module on all of them; a bare `import
     # tomllib` made collection die on 3.10 before a single test ran.
     import tomli as tomllib  # type: ignore[no-redef]
@@ -76,4 +76,12 @@ def test_the_declared_version_is_the_one_the_support_matrix_publishes() -> None:
 
     manifest = tomllib.loads((_PACKAGE_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     entry = next(p for p in matrix["packages"] if p["name"] == "mudraid-sdk")
-    assert manifest["project"]["version"] == entry["version"] == "1.3.0"
+    assert manifest["project"]["version"] == entry["version"] == "2.0.0"
+
+
+def test_standard_install_includes_signing_without_profile_selection() -> None:
+    manifest = tomllib.loads((_PACKAGE_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = manifest["project"]["dependencies"]
+    assert any(item.startswith("PyJWT>=") for item in dependencies)
+    assert any(item.startswith("cryptography>=") for item in dependencies)
+    assert "v2" not in manifest["project"].get("optional-dependencies", {})

@@ -38,14 +38,15 @@ lost one.
 
 Worth stating plainly, because a report is often about the difference. This is
 a **client** SDK: it obtains and presents credentials for an agent's outbound
-calls. It makes no authorization decision and enforces nothing.
+calls. It makes no authorization decision for the server. It restricts outbound bearer
+tokens to configured resource origins.
 
 - It holds credentials you supply and tokens it obtains. It never writes either
   to disk and never logs either; **a credential, secret or bearer token
   appearing in any log line is a vulnerability**, and one we will treat as such
-  even when nothing else is exploitable. `tests/unit/test_logging_guards.py`
-  asserts this at DEBUG level across the token lifecycle, including the
-  credential-failure and network-failure paths.
+  even when nothing else is exploitable. `tests/unit/test_machine_auth.py`
+  checks assertion and token logging at DEBUG level and credential-error
+  messages.
 - It retries a request once after a token expires mid-flight, and **only when
   the retry is consequence-safe** — an idempotent method, or a request you gave
   an `idempotency_key`. **A path that replays a consequential request without
@@ -64,10 +65,11 @@ calls. It makes no authorization decision and enforces nothing.
 - It **does not verify any signature on a server response**, and does not claim
   to. Responses are trusted to the extent TLS makes them trustworthy. Do not
   build a trust assumption on a signature that is not there.
-- With `Agent` (the legacy profile) a request that names no scopes receives the
-  agent's **full** permitted set. That is the documented behaviour of that
-  profile, not a defect; `MachineAgent` inverts it, and new integrations should
-  prefer it for exactly that reason. See the README's profile comparison.
+- `Agent` and `MachineAgent` are the same implementation. Scopes are explicit;
+  an empty request never means all permissions. Client-secret authentication
+  sends the secret only to the configured token endpoint.
+- Resource requests must match a configured origin, and automatic redirects
+  are refused. `tests/unit/test_resource_destinations.py` checks these boundaries.
 
 ## Supported versions
 
@@ -76,5 +78,5 @@ adapter support matrix, which is the authority here — not this section, and no
 a marketing page. It is not shipped inside this distribution; ask
 security@mudraid.ai for the entry covering the version you tested.
 
-This package is **1.x**. Report against the latest published version where you
+This package is **2.x**. Report against the latest published version where you
 can, and say which version you tested where you cannot.

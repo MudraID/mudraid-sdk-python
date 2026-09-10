@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mudraid-sdk"
-version = "1.3.0"
-description = "Python SDK for MudraID — drop-in replacement for `requests` that adds transparent agent authentication and per-platform token routing."
+version = "2.0.0"
+description = "V2 OAuth machine-authority client for MudraID with explicit resource-scoped tokens."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -53,31 +53,14 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-# Runtime dependencies are intentionally minimal so the SDK does not
-# drag heavy transitive packages into agent codebases.
+# Signing support is part of the standard installation.
 dependencies = [
     "requests>=2.31,<3",
-    # python-dotenv is used to read MUDRAID_API_KEY_ID / MUDRAID_SECRET from
-    # a project's .env file. It is the de-facto standard for this pattern
-    # in the Python ecosystem; integrators who already populate the OS
-    # environment never pay the load cost.
-    "python-dotenv>=1.0,<2",
-]
-
-# The V2 machine-authority profile signs `private_key_jwt` client assertions.
-# Signing is pluggable (see mudraid.AssertionSigner) so the SDK core stays
-# crypto-free; the built-in `PyJWTSigner` needs PyJWT, provided here as an
-# opt-in extra for integrators who want batteries-included signing.
-[project.optional-dependencies]
-v2 = [
-    # SECURITY FLOORS — see the same note in
-    # sdks/mudraid-middleware-python/pyproject.toml for the advisory data these
-    # come from. The previous `cryptography>=42,<46` capped
-    # below every version that fixes the records affecting 42–45, so a clean
-    # scan was unreachable inside the declared range.
     "PyJWT>=2.13.0,<3",
     "cryptography>=50.0.0",
 ]
+
+[project.optional-dependencies]
 dev = [
     # pytest-asyncio auto-loads whenever it is present, and a mismatched
     # (pytest, pytest-asyncio) pair crashes collection ('Package' object has no

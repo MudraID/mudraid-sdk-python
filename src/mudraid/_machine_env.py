@@ -6,12 +6,19 @@ import os
 import re
 from pathlib import Path
 
-from mudraid._machine_auth import AssertionSigner, MachineIdentity, PyJWTSigner
+from mudraid._machine_auth import (
+    AssertionSigner,
+    ClientSecretIdentity,
+    MachineIdentity,
+    PyJWTSigner,
+)
 from mudraid._scopes import RequestedScopes
 from mudraid.exceptions import MudraIDConfigError
 
 
-def load_machine_identity(prefix: str, *, signer: AssertionSigner | None = None) -> MachineIdentity:
+def load_machine_identity(
+    prefix: str, *, signer: AssertionSigner | None = None
+) -> MachineIdentity | ClientSecretIdentity:
     if not isinstance(prefix, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", prefix):
         raise MudraIDConfigError("prefix must be a non-empty environment-variable name fragment")
 
@@ -19,16 +26,30 @@ def load_machine_identity(prefix: str, *, signer: AssertionSigner | None = None)
         variable = f"{prefix}_{name}"
         value = os.environ.get(variable, "").strip()
         if not value:
-            raise MudraIDConfigError(f"Set {variable} for the V2 machine client")
+            raise MudraIDConfigError(f"Set {variable} for the machine client")
         return value
 
     # Read the complete identity before opening a key file. Failure remains
     # local; an unprefixed or legacy credential never repairs missing input.
     client_id = required("CLIENT_ID")
     token_endpoint = required("TOKEN_ENDPOINT")
-    audience = required("ASSERTION_AUDIENCE")
     resource = required("RESOURCE")
     scopes = RequestedScopes.of(os.environ.get(f"{prefix}_SCOPES", "").split())
+
+    method = os.environ.get(f"{prefix}_AUTH_METHOD", "private_key_jwt").strip()
+    if method == "client_secret_basic":
+        if signer is not None:
+            raise MudraIDConfigError("Choose client secret or signing key, not both")
+        return ClientSecretIdentity(
+            client_id=client_id,
+            token_endpoint=token_endpoint,
+            resource=resource,
+            scopes=scopes,
+            client_secret=required("CLIENT_SECRET"),
+        )
+    if method != "private_key_jwt":
+        raise MudraIDConfigError("AUTH_METHOD must be private_key_jwt or client_secret_basic")
+    audience = required("ASSERTION_AUDIENCE")
 
     if signer is None:
         key_path = required("PRIVATE_KEY_PATH")

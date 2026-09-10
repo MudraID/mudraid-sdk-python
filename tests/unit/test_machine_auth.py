@@ -364,7 +364,8 @@ def test_429_with_retry_after_maps_to_the_typed_rate_limit_error(
         MachineTokenManager(_identity()).get_token()
     assert exc.value.retry_after_seconds == 17
     assert "Retry after 17s" in str(exc.value)
-    assert "per-api_key_id budget" in str(exc.value)
+    assert "authorization service" in str(exc.value)
+    assert "platform-bootstrap" not in str(exc.value)
     assert "unexpected status" not in str(exc.value)
 
 

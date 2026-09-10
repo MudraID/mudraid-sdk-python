@@ -1,10 +1,7 @@
 """MachineAgent — the V2 machine-authority HTTP client.
 
-The V2 counterpart to :class:`mudraid.Agent`. Where the legacy ``Agent``
-authenticates with an api_key_id/secret pair and routes per registered platform,
-``MachineAgent`` authenticates with a ``private_key_jwt`` client assertion
-(:class:`mudraid.MachineIdentity`), carries a resource/scope-bound V2 access
-token, and applies consequence-safe retry semantics to every call.
+Both public names, Agent and MachineAgent, use this V2 client. Native
+key/secret authentication and platform discovery are not supported.
 
 Two safety invariants are enforced here end to end:
 
@@ -28,15 +25,49 @@ a consequential action.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
 from mudraid._consequence import IDEMPOTENCY_KEY_HEADER, execute, is_idempotent
-from mudraid._machine_auth import AssertionSigner, MachineIdentity, MachineTokenManager
+from mudraid._machine_auth import (
+    AssertionSigner,
+    ClientSecretIdentity,
+    MachineIdentity,
+    MachineTokenManager,
+)
 from mudraid._machine_env import load_machine_identity
+from mudraid.exceptions import MudraIDConfigError
 
 _logger = logging.getLogger("mudraid.machine_agent")
+
+
+def _origin(url: str) -> tuple[str, str, int]:
+    """Resolve an explicit HTTP destination without accepting URL parser repairs."""
+    try:
+        if (
+            not isinstance(url, str)
+            or "\\" in url
+            or any(ord(c) <= 32 or ord(c) == 127 for c in url)
+        ):
+            raise ValueError
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("https", "http") or not parsed.hostname:
+            raise ValueError
+        if parsed.username is not None or parsed.password is not None or parsed.fragment:
+            raise ValueError
+        if "%" in parsed.hostname or parsed.port == 0:
+            raise ValueError
+        host = parsed.hostname.encode("idna").decode("ascii").lower()
+        if parsed.scheme == "http" and host not in {"localhost", "127.0.0.1", "::1"}:
+            raise ValueError
+        return parsed.scheme, host, parsed.port or (443 if parsed.scheme == "https" else 80)
+    except (ValueError, UnicodeError):
+        raise MudraIDConfigError(
+            "resource destination requires HTTPS or loopback HTTP; no credentials or fragments"
+        ) from None
 
 
 class MachineAgent:
@@ -48,24 +79,43 @@ class MachineAgent:
     ) -> MachineAgent:
         """Construct V2 from explicit prefixed environment variables.
 
-        Requires CLIENT_ID, TOKEN_ENDPOINT, ASSERTION_AUDIENCE and RESOURCE.
-        SCOPES is space-separated; missing or empty requests no scopes. Supply
-        PRIVATE_KEY_PATH and KEY_ID for the built-in RS256 signer, or pass an
-        explicit signer (for example, backed by KMS). No .env file is loaded,
-        no legacy keys are read and no request is sent during construction.
+        Requires CLIENT_ID, TOKEN_ENDPOINT and RESOURCE. Signing (the default)
+        also requires ASSERTION_AUDIENCE and a signer or PRIVATE_KEY_PATH/KEY_ID.
+        Explicit AUTH_METHOD=client_secret_basic requires CLIENT_SECRET instead.
+        SCOPES and optional RESOURCE_ORIGINS are space-separated. Origins default
+        to the resource URI's origin; non-HTTP resource identifiers need explicit
+        origins. No .env file is loaded and no request is sent at construction.
         """
-        return cls(load_machine_identity(prefix, signer=signer))
+        identity = load_machine_identity(prefix, signer=signer)
+        origins = os.getenv(f"{prefix}_RESOURCE_ORIGINS")
+        return cls(identity, resource_origins=origins.split() if origins is not None else None)
 
     def __init__(
         self,
-        identity: MachineIdentity,
+        identity: MachineIdentity | ClientSecretIdentity,
         *,
         token_manager: MachineTokenManager | None = None,
+        resource_origins: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         self._identity = identity
+        destinations = [identity.resource] if resource_origins is None else resource_origins
+        if not isinstance(destinations, (list, tuple)) or not destinations:
+            raise MudraIDConfigError(
+                "resource_origins must be a non-empty list of trusted resource URLs"
+            )
+        self._resource_origins = frozenset(_origin(url) for url in destinations)
+        if resource_origins is not None:
+            for destination in destinations:
+                parts = urlsplit(destination)
+                if parts.path not in ("", "/") or parts.query:
+                    raise MudraIDConfigError(
+                        "resource_origins accepts origins only, without paths or queries"
+                    )
+
         # The token manager owns its own session to the token endpoint; a
         # separate session carries the issued bearer to resource servers so the
         # assertion and the access token never share a connection or headers.
+        self._owns_tokens = token_manager is None
         self._tokens = token_manager or MachineTokenManager(identity)
         self._session = requests.Session()
         _logger.info(
@@ -120,6 +170,8 @@ class MachineAgent:
     def close(self) -> None:
         """Release the underlying connection pools. Optional."""
         self._session.close()
+        if self._owns_tokens:
+            self._tokens.close()
 
     # ---- internals ------------------------------------------------------
 
@@ -139,6 +191,15 @@ class MachineAgent:
         server mutated state would otherwise be duplicated. In that case the
         original 401 response is returned for the caller to handle.
         """
+        if _origin(url) not in self._resource_origins:
+            raise MudraIDConfigError(
+                "request destination is outside the configured resource origins"
+            )
+        if kwargs.get("allow_redirects", False):
+            raise MudraIDConfigError(
+                "redirects are disabled; make an explicit request to a trusted destination"
+            )
+        kwargs["allow_redirects"] = False
         caller_headers = dict(kwargs.pop("headers", None) or {})
 
         def send(extra_headers: dict[str, str]) -> requests.Response:

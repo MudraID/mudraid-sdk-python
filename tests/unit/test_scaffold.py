@@ -24,17 +24,8 @@ def test_version_is_exposed() -> None:
     assert mudraid.__version__.count(".") == 2  # semver-shaped
 
 
-def test_agent_constructor_accepts_explicit_credentials() -> None:
-    """Construction must succeed with explicit kwargs even before
-    M4.2 wires the env loader — otherwise downstream tasks can't
-    write tests that don't depend on environment variables."""
-    from mudraid import Agent
+def test_agent_defaults_to_machine_authority() -> None:
+    from mudraid import Agent, MachineAgent
 
-    Agent(api_key_id="muid_kid_test", secret="muid_sk_test")
-    # No exception = pass.
-
-
-# test_http_methods_raise_until_m4_5_implements_them — removed in M4.5
-# along with the NotImplementedError stubs it was guarding. Real
-# behavioural coverage of the HTTP methods now lives in
-# test_agent_http.py.
+    assert Agent is MachineAgent
+    assert not hasattr(Agent, "legacy")
